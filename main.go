@@ -8,10 +8,11 @@
 package main
 
 import (
-	"encoding/json"
+	//"encoding/json"
 	"fmt"
+	//"github.com/Masterminds/semver/v3"
 	//	"log"
-	//	"os"
+	//"os"
 	//	"path/filepath"
 	//	"strconv"
 
@@ -22,16 +23,6 @@ import (
 	"helm.sh/helm/v3/pkg/repo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
-
-/*type releaseElement struct {
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Revision   string `json:"revision"`
-	Updated    string `json:"updated"`
-	Status     string `json:"status"`
-	Chart      string `json:"chart"`
-	AppVersion string `json:"app_version"`
-}*/
 
 type repositoryElement struct {
 	Name string `json:"name"`
@@ -50,76 +41,46 @@ func listRepos() {
 	}
 }
 
-func main() {
-	elements, _ := listCharts()
-	s, _ := json.MarshalIndent(elements, "", "  ")
-	fmt.Printf("%s\n", string(s))
-
-	/*
-		rf, err := repo.LoadFile(settings.RepositoryConfig)
-		if os.IsNotExist(err) || len(rf.Repositories) == 0 {
-			fmt.Println("no repositories configured")
-			os.Exit(1)
+func elementExists(list []string, item string) bool {
+	for _, tmp := range list {
+		if tmp == item {
+			return true
 		}
+	}
+	return false
+}
 
-		i := search.NewIndex()
-		for _, re := range rf.Repositories {
-			n := re.Name
-			f := filepath.Join(settings.RepositoryCache, helmpath.CacheIndexFile(n))
-			ind, err := repo.LoadIndexFile(f)
-			if err != nil {
-				fmt.Printf("Repo %q is corrupt or missing. Try 'helm repo update'.\n", n)
-				fmt.Printf("%s\n", err)
+func main() {
+	var chartVersions []map[string][]chartVersion
+	var chartList []string
+
+	//Get list with all installed charts
+	items, _ := listCharts()
+	for _, item := range items {
+		if !elementExists(chartList, item.ChartName) {
+			chartList = append(chartList, item.ChartName)
+		}
+	}
+
+	//Get all versions charts available
+	chartVersions, _ = searchChartVersions(chartList)
+	//s, _ := json.MarshalIndent(chartVersions, "", "  ")
+	//fmt.Printf("%s\n", string(s))
+
+	// check the versions
+	for _, tmp := range chartVersions {
+		for k, v := range tmp {
+			if v == nil {
+				fmt.Printf("We didn't detected chart versions for %s\n", k)
 				continue
 			}
-
-			i.AddRepo(n, ind, true)
-		}
-
-		var res []*search.Result
-		res = i.All()
-		search.SortScore(res)
-
-		for _, r := range res {
-			fmt.Printf("%s - %s\n", r.Name, r.Chart.Version)
-		}
-
-		listRepos()
-
-		actionConfig := new(action.Configuration)
-		// You can pass an empty string instead of settings.Namespace() to list
-		// all namespaces
-		if err := actionConfig.Init(settings.RESTClientGetter(), "vault", os.Getenv("HELM_DRIVER"), log.Printf); err != nil {
-			// if err := actionConfig.Init(settings.RESTClientGetter(), "", "", log.Printf); err != nil {
-			log.Printf("%+v", err)
-			os.Exit(1)
-		}
-
-		client := action.NewList(actionConfig)
-		// Only list deployed
-		client.Deployed = true
-		results, err := client.Run()
-		if err != nil {
-			log.Printf("%+v", err)
-			os.Exit(1)
-		}
-
-		for _, r := range results {
-			element := releaseElement{
-				Name:       r.Name,
-				Namespace:  r.Namespace,
-				Revision:   strconv.Itoa(r.Version),
-				Status:     r.Info.Status.String(),
-				Chart:      fmt.Sprintf("%s-%s", r.Chart.Metadata.Name, r.Chart.Metadata.Version),
-				AppVersion: r.Chart.Metadata.AppVersion,
+			for _, chart := range items {
+				if chart.ChartName == k {
+					for _, version := range v {
+						fmt.Println(version.ChartVersion)
+					}
+				}
 			}
-			b, err := json.MarshalIndent(element, "", "  ")
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			fmt.Println(string(b))
 		}
-		// exposeMetric()
-	*/
+	}
 }
