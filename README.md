@@ -13,10 +13,11 @@ helm_chart_overdue{chart="vault",namespace="vault",version="0.15.0"} 1
 ```
 
 where:
-|| value | description                                     ||
- |  -1   | The chart has not been found in monitored repos |
- |   0   | The chart is up-to-date                         |
- |  >1   | Number of versions the chart is overdue.        |
+| value | description                                     |
+|-------|-------------------------------------------------|
+|  -1   | The chart has not been found in monitored repos |
+|   0   | The chart is up-to-date                         |
+|  >1   | Number of versions the chart is overdue.        |
 
 
 ## How to test locally
