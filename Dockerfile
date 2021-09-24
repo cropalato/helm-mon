@@ -30,6 +30,6 @@ COPY --from=build /helm-mon /helm-mon
 
 RUN apk add --no-cache strace
 
-EXPOSE 8080
+EXPOSE 2112
 
 CMD [ "/helm-mon" ]
