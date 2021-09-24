@@ -10,26 +10,24 @@ package main
 import (
 	//"encoding/json"
 	"fmt"
-	//"github.com/Masterminds/semver/v3"
-	//	"log"
-	//"os"
-	//	"path/filepath"
-	//	"strconv"
+	"github.com/Masterminds/semver/v3"
+	"os"
+	"time"
 
-	//	"helm.sh/helm/v3/cmd/helm/search"
-	//	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
-	//	"helm.sh/helm/v3/pkg/helmpath"
 	"helm.sh/helm/v3/pkg/repo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
-type repositoryElement struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+type chartOverdue struct {
+	ChartVersion string  `json:"chart_version"`
+	Namespace    string  `json:"namespace"`
+	Overdue      float64 `json:"n_overdue"`
 }
 
 var settings = cli.New()
+var helmMetrics []map[string]chartOverdue
+var err error
 
 func listRepos() {
 
@@ -50,9 +48,26 @@ func elementExists(list []string, item string) bool {
 	return false
 }
 
-func main() {
+func refreshHelmMetrics() {
+	go func() {
+		for {
+			helmMetrics, err = getHelmStatus()
+			if err != nil {
+				fmt.Println("Error running getHelmStatus().")
+				os.Exit(1)
+			}
+			time.Sleep(20 * time.Second)
+		}
+	}()
+}
+
+func getHelmStatus() ([]map[string]chartOverdue, error) {
 	var chartVersions []map[string][]chartVersion
 	var chartList []string
+	var count float64
+	var chartStatus chartOverdue
+	var tmpHelmMetrics []map[string]chartOverdue
+	var newStatus map[string]chartOverdue
 
 	//Get list with all installed charts
 	items, _ := listCharts()
@@ -69,18 +84,44 @@ func main() {
 
 	// check the versions
 	for _, tmp := range chartVersions {
-		for k, v := range tmp {
-			if v == nil {
-				fmt.Printf("We didn't detected chart versions for %s\n", k)
-				continue
-			}
+		for key, value := range tmp {
 			for _, chart := range items {
-				if chart.ChartName == k {
-					for _, version := range v {
-						fmt.Println(version.ChartVersion)
+				if chart.ChartName == key {
+					constraint, err := semver.NewConstraint(">" + chart.ChartVersion)
+					if err != nil {
+						fmt.Println(err, "an invalid version/constraint format")
+						os.Exit(1)
 					}
+					count = 0
+					if value != nil {
+						for _, version := range value {
+							v, err := semver.NewVersion(version.ChartVersion)
+							if err != nil {
+								fmt.Println(err, "an invalid version/constraint format")
+								os.Exit(1)
+							}
+							if constraint.Check(v) {
+								count++
+							}
+						}
+						chartStatus.Overdue = count
+					} else {
+						chartStatus.Overdue = -1
+					}
+					chartStatus.ChartVersion = chart.ChartVersion
+					chartStatus.Namespace = chart.Namespace
+					newStatus = map[string]chartOverdue{
+						chart.ChartName: chartStatus,
+					}
+					tmpHelmMetrics = append(tmpHelmMetrics, newStatus)
 				}
 			}
 		}
 	}
+	return tmpHelmMetrics, nil
+}
+
+func main() {
+	refreshHelmMetrics()
+	exposeMetric()
 }
