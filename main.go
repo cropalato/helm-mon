@@ -9,9 +9,8 @@ package main
 
 import (
 	//"encoding/json"
-	"fmt"
 	"github.com/Masterminds/semver/v3"
-	"os"
+	"log"
 	"time"
 
 	"helm.sh/helm/v3/pkg/cli"
@@ -34,7 +33,7 @@ func listRepos() {
 	f, err := repo.LoadFile(cli.New().RepositoryConfig)
 	if err == nil && len(f.Repositories) > 0 {
 		for _, repo := range f.Repositories {
-			fmt.Printf("%s - %s\n", repo.Name, repo.URL)
+			log.Printf("%s - %s\n", repo.Name, repo.URL)
 		}
 	}
 }
@@ -53,8 +52,7 @@ func refreshHelmMetrics() {
 		for {
 			helmMetrics, err = getHelmStatus()
 			if err != nil {
-				fmt.Println("Error running getHelmStatus().")
-				os.Exit(1)
+				log.Fatal("Error running getHelmStatus().")
 			}
 			time.Sleep(20 * time.Second)
 		}
@@ -89,16 +87,14 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 				if chart.ChartName == key {
 					constraint, err := semver.NewConstraint(">" + chart.ChartVersion)
 					if err != nil {
-						fmt.Println(err, "an invalid version/constraint format")
-						os.Exit(1)
+						log.Fatal(err, "an invalid version/constraint format")
 					}
 					count = 0
 					if value != nil {
 						for _, version := range value {
 							v, err := semver.NewVersion(version.ChartVersion)
 							if err != nil {
-								fmt.Println(err, "an invalid version/constraint format")
-								os.Exit(1)
+								log.Fatal(err, "an invalid version/constraint format")
 							}
 							if constraint.Check(v) {
 								count++
@@ -122,6 +118,7 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 }
 
 func main() {
+	log.Print("Starting the service ...")
 	refreshHelmMetrics()
 	exposeMetric()
 }
