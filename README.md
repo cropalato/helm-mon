@@ -28,3 +28,4 @@ This project requires a kube config to access the cluster kubernetes and a helm 
 docker run --rm --name helm-mon -v ${HOME}/.kube:/root/.kube -v ${HOME}/.config/helm:/root/.config/helm -p 2112:2112 cropalato/helm-mon:v0.1.0
 ```
 
+
