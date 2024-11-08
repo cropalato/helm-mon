@@ -19,15 +19,90 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/repo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
-type chartOverdue struct {
-	ChartVersion string  `json:"chart_version"`
-	Namespace    string  `json:"namespace"`
-	Overdue      float64 `json:"n_overdue"`
+// Custom error types for better error handling
+type (
+	// HelmError wraps helm-related errors with context
+	HelmError struct {
+		Op      string                 // Operation that failed
+		Err     error                  // Original error
+		Chart   string                 // Chart name if applicable
+		Details map[string]interface{} // Additional context
+	}
+
+	// RepositoryError wraps repository-related errors
+	RepositoryError struct {
+		Op   string
+		Repo string
+		Err  error
+	}
+
+	// MetricsError wraps metrics-related errors
+	MetricsError struct {
+		Op         string
+		Err        error
+		MetricName string
+	}
+	chartOverdue struct {
+		ChartVersion string  `json:"chart_version"`
+		Namespace    string  `json:"namespace"`
+		Overdue      float64 `json:"n_overdue"`
+	}
+)
+
+// Error implementations
+func (e *HelmError) Error() string {
+	if e.Chart != "" {
+		return fmt.Sprintf("helm operation %s failed for chart %s: %v", e.Op, e.Chart, e.Err)
+	}
+	return fmt.Sprintf("helm operation %s failed: %v", e.Op, e.Err)
+}
+
+func (e *RepositoryError) Error() string {
+	return fmt.Sprintf("repository operation %s failed for repo %s: %v", e.Op, e.Repo, e.Err)
+}
+
+func (e *MetricsError) Error() string {
+	return fmt.Sprintf("metrics operation %s failed for %s: %v", e.Op, e.MetricName, e.Err)
+}
+
+// Logger initialization with custom configuration
+func initLogger(debug bool) (*zap.Logger, error) {
+	config := zap.NewProductionConfig()
+
+	// Customize logging configuration
+	config.EncoderConfig.TimeKey = "timestamp"
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	config.EncoderConfig.StacktraceKey = "stacktrace"
+	config.EncoderConfig.MessageKey = "message"
+	config.EncoderConfig.LevelKey = "level"
+
+	if debug {
+		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+		config.Development = true
+	}
+
+	logger, err := config.Build(
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.ErrorLevel),
+		zap.Fields(
+			zap.String("service", "helm-monitor"),
+			zap.String("version", "1.0.0"),
+		),
+	)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize logger")
+	}
+
+	return logger, nil
 }
 
 var settings = cli.New()
@@ -58,7 +133,8 @@ func elementExists(list []string, item string) bool {
 	return false
 }
 
-func refreshHelmMetrics(ctx context.Context, errChan chan<- error) error {
+func refreshHelmMetrics(ctx context.Context, logger *zap.Logger, errChan chan<- error) error {
+	logger.Info("starting metrics refresh routine")
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
@@ -66,23 +142,46 @@ func refreshHelmMetrics(ctx context.Context, errChan chan<- error) error {
 		for {
 			select {
 			case <-ctx.Done():
+				logger.Info("stopping metrics refresh routine",
+					zap.String("reason", "context cancelled"))
 				errChan <- ctx.Err()
 				return
 			case <-ticker.C:
-				helmMetrics, err = getHelmStatus()
+				start := time.Now()
+				logger.Debug("refreshing helm metrics")
+				status, err := getHelmStatus(logger)
 				if err != nil {
-					log.Printf("Error getting helm status: %v", err)
-					// Optionally send to error channel if you want to terminate the program
-					// errChan <- fmt.Errorf("failed to get helm status: %w", err)
-					// return
+					recordOperationError("refresh_metrics", "status_failed")
+					logger.Error("failed to refresh metrics",
+						zap.Error(err),
+						zap.Time("timestamp", time.Now()))
+					// Record metric for failed refresh
+					continue
 				}
+				helmMetrics = status
+
+				// Update overdue metrics for each chart
+				for _, metric := range status {
+					for chartName, chartData := range metric {
+						recordChartOverdue(
+							chartName,
+							chartData.Namespace,
+							chartData.ChartVersion,
+							chartData.Overdue,
+						)
+					}
+				}
+				recordOperationDuration("refresh_metrics", time.Since(start).Seconds())
+				logger.Debug("metrics refresh completed",
+					zap.Int("metric_count", len(status)),
+					zap.Time("timestamp", time.Now()))
 			}
 		}
 	}()
 	return nil
 }
 
-func getHelmStatus() ([]map[string]chartOverdue, error) {
+func getHelmStatus(logger *zap.Logger) ([]map[string]chartOverdue, error) {
 	var chartVersions []map[string][]chartVersion
 	var chartList []string
 	var count float64
@@ -91,7 +190,7 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 	var newStatus map[string]chartOverdue
 
 	//Get list with all installed charts
-	items, err := listCharts()
+	items, err := listCharts(logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list charts: %w", err)
 	}
@@ -102,7 +201,7 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 	}
 
 	//Get all versions charts available
-	chartVersions, err = searchChartVersions(chartList)
+	chartVersions, err = searchChartVersions(logger, chartList)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search chart versions: %w", err)
 	}
@@ -147,6 +246,17 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 }
 
 func main() {
+	// Initialize logger
+	logger, err := initLogger(settings.Debug)
+	if err != nil {
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer logger.Sync()
+
+	logger.Info("starting helm-monitor service",
+		zap.Bool("debug", settings.Debug))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -156,23 +266,31 @@ func main() {
 
 	errChan := make(chan error, 1)
 
-	if err := refreshHelmMetrics(ctx, errChan); err != nil {
-		log.Fatalf("Failed to start metrics refresh: %v", err)
+	if err := refreshHelmMetrics(ctx, logger, errChan); err != nil {
+		logger.Fatal("failed to start metrics refresh",
+			zap.Error(err))
 	}
 
-	if err := exposeMetric(ctx); err != nil {
-		log.Fatalf("Failed to start metrics server: %v", err)
+	if err := exposeMetric(ctx, logger); err != nil {
+		logger.Fatal("failed to start metrics server",
+			zap.Error(err))
 	}
 
 	select {
 	case err := <-errChan:
-		log.Printf("Service error: %v", err)
+		logger.Error("Service error",
+			zap.Error(err),
+			zap.Time("timestamp", time.Now()))
 	case sig := <-sigChan:
-		log.Printf("Received signal: %v", sig)
+		logger.Debug("Received signal",
+			zap.String("signal", sig.String()),
+			zap.Time("timestamp", time.Now()))
 	}
+
+	logger.Info("helm-monitor service started successfully")
 
 	// Initiate graceful shutdown
 	cancel()
-	log.Println("Shutting down services...")
+	logger.Info("Shutting down services...")
 	time.Sleep(time.Second * 5) // Give time for cleanup
 }

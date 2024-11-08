@@ -16,6 +16,7 @@ import (
 	"strconv"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 	"helm.sh/helm/v3/cmd/helm/search"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/helmpath"
@@ -62,17 +63,34 @@ func warning(format string, v ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, v...)
 }
 
-func listCharts() ([]releaseElement, error) {
+func listCharts(logger *zap.Logger) ([]releaseElement, error) {
 	cfg := new(action.Configuration)
 	client := action.NewList(cfg)
 	if err := cfg.Init(settings.RESTClientGetter(), "", os.Getenv("HELM_DRIVER"), debug); err != nil {
-		return nil, err
+		logger.Error("failed to initialize helm configuration",
+			zap.Error(err),
+			zap.String("namespace", ""),
+			zap.String("driver", os.Getenv("HELM_DRIVER")))
+		return nil, &HelmError{
+			Op:  "init_config",
+			Err: err,
+			Details: map[string]interface{}{
+				"driver": os.Getenv("HELM_DRIVER"),
+			},
+		}
 	}
 	client.SetStateMask()
 	results, err := client.Run()
 	if err != nil {
-		return nil, err
+		logger.Error("failed to list releases",
+			zap.Error(err))
+		return nil, &HelmError{
+			Op:  "list_releases",
+			Err: err,
+		}
 	}
+	logger.Info("successfully listed helm releases",
+		zap.Int("count", len(results)))
 	elements := make([]releaseElement, 0, len(results))
 	for _, r := range results {
 		element := releaseElement{
@@ -85,20 +103,31 @@ func listCharts() ([]releaseElement, error) {
 			AppVersion:   r.Chart.Metadata.AppVersion,
 		}
 		elements = append(elements, element)
+		logger.Debug("processed release",
+			zap.String("name", element.Name),
+			zap.String("namespace", element.Namespace),
+			zap.String("version", element.ChartVersion))
 	}
 	return elements, nil
 }
 
-//func searchChartVersions(chartName string) ([]chartInfo, error) {
-func searchChartVersions(charts []string) ([]map[string][]chartVersion, error) {
+// func searchChartVersions(chartName string) ([]chartInfo, error) {
+func searchChartVersions(logger *zap.Logger, charts []string) ([]map[string][]chartVersion, error) {
+	logger.Debug("searching chart versions",
+		zap.Strings("charts", charts))
 	//Load repo file
 	rf, err := repo.LoadFile(settings.RepositoryConfig)
 	if isNotExist(err) || len(rf.Repositories) == 0 {
-		return nil, errors.New("no repositories configured")
+		logger.Error("no repositories configured",
+			zap.String("config_path", settings.RepositoryConfig))
+		return nil, &RepositoryError{
+			Op:   "load_repo_file",
+			Repo: settings.RepositoryConfig,
+			Err:  errors.New("no repositories configured"),
+		}
 	}
 
-	var chartList = make([]map[string][]chartVersion, len(charts))
-	var version chartVersion
+	chartList := make([]map[string][]chartVersion, len(charts))
 	//chart := make(map[string][]chartVersion)
 
 	i := search.NewIndex()
@@ -107,8 +136,10 @@ func searchChartVersions(charts []string) ([]map[string][]chartVersion, error) {
 		f := filepath.Join(settings.RepositoryCache, helmpath.CacheIndexFile(n))
 		ind, err := repo.LoadIndexFile(f)
 		if err != nil {
-			warning("Repo %q is corrupt or missing. Try 'helm repo update'.", n)
-			warning("%s", err)
+			logger.Warn("repository is corrupt or missing",
+				zap.String("repo", re.Name),
+				zap.String("cache_file", f),
+				zap.Error(err))
 			continue
 		}
 
@@ -119,19 +150,22 @@ func searchChartVersions(charts []string) ([]map[string][]chartVersion, error) {
 	//search.SortScore(res)
 	for i, chartTarget := range charts {
 		chartList[i] = map[string][]chartVersion{chartTarget: nil}
+		versions := []chartVersion{}
+
 		for _, tmp := range res {
 			if tmp.Chart.Name != chartTarget {
 				continue
 			}
-			version.AppVersion = tmp.Chart.AppVersion
-			version.ChartVersion = tmp.Chart.Version
-			chartList[i][chartTarget] = append(chartList[i][chartTarget], version)
-			/*
-				chart[tmp.Chart.Name]
-				chart.Versions = append(chart.Versions, version)
-				chartList = append(chartList, chart)
-			*/
+			version := chartVersion{
+				AppVersion:   tmp.Chart.AppVersion,
+				ChartVersion: tmp.Chart.Version,
+			}
+			versions = append(versions, version)
 		}
+		chartList[i][chartTarget] = versions
+		logger.Info("processed chart versions",
+			zap.String("chart", chartTarget),
+			zap.Int("version_count", len(versions)))
 	}
 	return chartList, nil
 }
