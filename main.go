@@ -9,10 +9,13 @@ package main
 
 import (
 	//"encoding/json"
-	"github.com/Masterminds/semver/v3"
+	"fmt"
 	"log"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+
+	"golang.org/x/exp/constraints"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/repo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -28,14 +31,26 @@ var settings = cli.New()
 var helmMetrics []map[string]chartOverdue
 var err error
 
-func listRepos() {
+func min[T constraints.Ordered](a, b T) T {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func listRepos() error {
 
 	f, err := repo.LoadFile(cli.New().RepositoryConfig)
-	if err == nil && len(f.Repositories) > 0 {
-		for _, repo := range f.Repositories {
-			log.Printf("%s - %s\n", repo.Name, repo.URL)
-		}
+	if err != nil {
+		return fmt.Errorf("failed to load repository file: %w", err)
 	}
+	if len(f.Repositories) == 0 {
+		return fmt.Errorf("no repositories configured")
+	}
+	for _, repo := range f.Repositories {
+		log.Printf("%s - %s\n", repo.Name, repo.URL)
+	}
+	return nil
 }
 
 func elementExists(list []string, item string) bool {
@@ -49,12 +64,18 @@ func elementExists(list []string, item string) bool {
 
 func refreshHelmMetrics() {
 	go func() {
+		backoff := time.Second * 5
+		maxBackoff := time.Minute * 5
 		for {
 			helmMetrics, err = getHelmStatus()
 			if err != nil {
-				log.Fatal("Error running getHelmStatus().")
+				log.Printf("Error running getHelmStatus(): %v. Retrying in %v", err, backoff)
+				time.Sleep(backoff)
+				backoff = min(backoff*2, maxBackoff)
+				continue
 			}
-			time.Sleep(20 * time.Second)
+			backoff = time.Second * 5
+			time.Sleep(backoff)
 		}
 	}()
 }
@@ -68,7 +89,10 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 	var newStatus map[string]chartOverdue
 
 	//Get list with all installed charts
-	items, _ := listCharts()
+	items, err := listCharts()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list charts: %w", err)
+	}
 	for _, item := range items {
 		if !elementExists(chartList, item.ChartName) {
 			chartList = append(chartList, item.ChartName)
@@ -76,7 +100,10 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 	}
 
 	//Get all versions charts available
-	chartVersions, _ = searchChartVersions(chartList)
+	chartVersions, err = searchChartVersions(chartList)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search chart versions: %w", err)
+	}
 	//s, _ := json.MarshalIndent(chartVersions, "", "  ")
 	//fmt.Printf("%s\n", string(s))
 
@@ -121,4 +148,21 @@ func main() {
 	log.Print("Starting the service ...")
 	refreshHelmMetrics()
 	exposeMetric()
+	// errChan := make(chan error, 1)
+	// go func() {
+	// 	if err := refreshHelmMetrics(); err != nil {
+	// 		errChan <- fmt.Errorf("metrics refresh failed: %w", err)
+	// 	}
+	// }()
+
+	// go func() {
+	// 	if err := exposeMetric(); err != nil {
+	// 		errChan <- fmt.Errorf("metrics server failed: %w", err)
+	// 	}
+	// }()
+
+	// select {
+	// case err := <-errChan:
+	// 	log.Fatalf("Service error: %v", err)
+	// }
 }
