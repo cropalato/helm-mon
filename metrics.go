@@ -8,7 +8,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -18,9 +20,15 @@ import (
 
 var helm_version_metric []map[string]prometheus.Gauge
 
-func recordMetrics(tmpTest map[string]prometheus.Gauge) {
-	go func() {
-		for {
+func recordMetrics(ctx context.Context, tmpTest map[string]prometheus.Gauge) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			if len(tmpTest) != 0 {
 				for _, metric := range helmMetrics {
 					for k, v := range metric {
@@ -28,34 +36,77 @@ func recordMetrics(tmpTest map[string]prometheus.Gauge) {
 					}
 				}
 			}
-			time.Sleep(2 * time.Second)
 		}
-	}()
+	}
 }
 
-func exposeMetric() {
+func exposeMetric(ctx context.Context) error {
 	tmpTest := make(map[string]prometheus.Gauge)
+
+	timeout := time.After(time.Minute * 2)
 	for {
 		if len(helmMetrics) != 0 {
 			break
 		}
-		fmt.Println("Waiting for metrics...")
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for initial metrics")
+		default:
+			log.Println("Waiting for metrics...")
+			time.Sleep(2 * time.Second)
+		}
 	}
 	for _, metric := range helmMetrics {
 		for k, v := range metric {
-			tmpTest[v.Namespace+"/"+k] = prometheus.NewGauge(prometheus.GaugeOpts{
-				Name:        "helm_chart_overdue",
-				Help:        "The number of versions the chart is overdue.",
-				ConstLabels: prometheus.Labels{"chart": k, "version": v.ChartVersion, "namespace": v.Namespace},
+			metricName := v.Namespace + "/" + k
+			tmpTest[metricName] = prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "helm_chart_overdue",
+				Help: "The number of versions the chart is overdue.",
+				ConstLabels: prometheus.Labels{
+					"chart":     k,
+					"version":   v.ChartVersion,
+					"namespace": v.Namespace,
+				},
 			})
-			prometheus.MustRegister(tmpTest[v.Namespace+"/"+k])
-
+			if err := prometheus.Register(tmpTest[metricName]); err != nil {
+				return fmt.Errorf("failed to register metric %s: %w", metricName, err)
+			}
 		}
 	}
-	recordMetrics(tmpTest)
+	go recordMetrics(ctx, tmpTest)
 
 	fmt.Println("listening http://0.0.0.0:2112/metrics ...")
-	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(":2112", nil)
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	server := &http.Server{
+		Addr:    ":2112",
+		Handler: mux,
+	}
+
+	// Channel to capture server errors
+	serverError := make(chan error, 1)
+
+	go func() {
+		log.Println("listening http://0.0.0.0:2112/metrics ...")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverError <- fmt.Errorf("metrics server error: %w", err)
+		}
+	}()
+
+	// Wait for context cancellation or server error
+	select {
+	case err := <-serverError:
+		return err
+	case <-ctx.Done():
+		// Graceful shutdown
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("error shutting down metrics server: %w", err)
+		}
+		return ctx.Err()
+	}
 }

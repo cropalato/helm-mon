@@ -9,13 +9,16 @@ package main
 
 import (
 	//"encoding/json"
+	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
 
-	"golang.org/x/exp/constraints"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/repo"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -30,13 +33,6 @@ type chartOverdue struct {
 var settings = cli.New()
 var helmMetrics []map[string]chartOverdue
 var err error
-
-func min[T constraints.Ordered](a, b T) T {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 func listRepos() error {
 
@@ -62,22 +58,28 @@ func elementExists(list []string, item string) bool {
 	return false
 }
 
-func refreshHelmMetrics() {
+func refreshHelmMetrics(ctx context.Context, errChan chan<- error) error {
 	go func() {
-		backoff := time.Second * 5
-		maxBackoff := time.Minute * 5
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			helmMetrics, err = getHelmStatus()
-			if err != nil {
-				log.Printf("Error running getHelmStatus(): %v. Retrying in %v", err, backoff)
-				time.Sleep(backoff)
-				backoff = min(backoff*2, maxBackoff)
-				continue
+			select {
+			case <-ctx.Done():
+				errChan <- ctx.Err()
+				return
+			case <-ticker.C:
+				helmMetrics, err = getHelmStatus()
+				if err != nil {
+					log.Printf("Error getting helm status: %v", err)
+					// Optionally send to error channel if you want to terminate the program
+					// errChan <- fmt.Errorf("failed to get helm status: %w", err)
+					// return
+				}
 			}
-			backoff = time.Second * 5
-			time.Sleep(backoff)
 		}
 	}()
+	return nil
 }
 
 func getHelmStatus() ([]map[string]chartOverdue, error) {
@@ -145,24 +147,32 @@ func getHelmStatus() ([]map[string]chartOverdue, error) {
 }
 
 func main() {
-	log.Print("Starting the service ...")
-	refreshHelmMetrics()
-	exposeMetric()
-	// errChan := make(chan error, 1)
-	// go func() {
-	// 	if err := refreshHelmMetrics(); err != nil {
-	// 		errChan <- fmt.Errorf("metrics refresh failed: %w", err)
-	// 	}
-	// }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// go func() {
-	// 	if err := exposeMetric(); err != nil {
-	// 		errChan <- fmt.Errorf("metrics server failed: %w", err)
-	// 	}
-	// }()
+	// Setup graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// select {
-	// case err := <-errChan:
-	// 	log.Fatalf("Service error: %v", err)
-	// }
+	errChan := make(chan error, 1)
+
+	if err := refreshHelmMetrics(ctx, errChan); err != nil {
+		log.Fatalf("Failed to start metrics refresh: %v", err)
+	}
+
+	if err := exposeMetric(ctx); err != nil {
+		log.Fatalf("Failed to start metrics server: %v", err)
+	}
+
+	select {
+	case err := <-errChan:
+		log.Printf("Service error: %v", err)
+	case sig := <-sigChan:
+		log.Printf("Received signal: %v", sig)
+	}
+
+	// Initiate graceful shutdown
+	cancel()
+	log.Println("Shutting down services...")
+	time.Sleep(time.Second * 5) // Give time for cleanup
 }

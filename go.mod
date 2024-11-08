@@ -9,7 +9,6 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.11.0
 	github.com/stretchr/testify v1.7.0
-	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c
 	helm.sh/helm/v3 v3.7.0
 	k8s.io/client-go v0.22.2
 )
