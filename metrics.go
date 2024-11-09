@@ -185,7 +185,7 @@ func exposeMetric(ctx context.Context, logger *zap.Logger) error {
 		case <-timeout:
 			return fmt.Errorf("timeout waiting for initial metrics")
 		default:
-			logger.Info("waiting for initial metrics...")
+			logger.Debug("waiting for initial metrics...")
 			time.Sleep(2 * time.Second)
 		}
 	}

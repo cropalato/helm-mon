@@ -212,33 +212,38 @@ func getHelmStatus(logger *zap.Logger) ([]map[string]chartOverdue, error) {
 	for _, tmp := range chartVersions {
 		for key, value := range tmp {
 			for _, chart := range items {
-				if chart.ChartName == key {
-					constraint, err := semver.NewConstraint(">" + chart.ChartVersion)
-					if err != nil {
-						log.Fatal(err, "an invalid version/constraint format")
-					}
-					count = 0
-					if value != nil {
-						for _, version := range value {
-							v, err := semver.NewVersion(version.ChartVersion)
-							if err != nil {
-								log.Fatal(err, "an invalid version/constraint format")
-							}
-							if constraint.Check(v) {
-								count++
-							}
-						}
-						chartStatus.Overdue = count
-					} else {
-						chartStatus.Overdue = -1
-					}
-					chartStatus.ChartVersion = chart.ChartVersion
-					chartStatus.Namespace = chart.Namespace
-					newStatus = map[string]chartOverdue{
-						chart.ChartName: chartStatus,
-					}
-					tmpHelmMetrics = append(tmpHelmMetrics, newStatus)
+				if chart.ChartName != key {
+					continue
 				}
+				constraint, err := semver.NewConstraint(">" + chart.ChartVersion)
+				if err != nil {
+					logger.Error("an invalid version/constraint format",
+						zap.Error(err))
+					continue
+				}
+				count = 0
+				if value != nil {
+					for _, version := range value {
+						v, err := semver.NewVersion(version.ChartVersion)
+						if err != nil {
+							logger.Error("an invalid version/constraint format",
+								zap.Error(err))
+							continue
+						}
+						if constraint.Check(v) {
+							count++
+						}
+					}
+					chartStatus.Overdue = count
+				} else {
+					chartStatus.Overdue = -1
+				}
+				chartStatus.ChartVersion = chart.ChartVersion
+				chartStatus.Namespace = chart.Namespace
+				newStatus = map[string]chartOverdue{
+					chart.ChartName: chartStatus,
+				}
+				tmpHelmMetrics = append(tmpHelmMetrics, newStatus)
 			}
 		}
 	}

@@ -89,8 +89,6 @@ func listCharts(logger *zap.Logger) ([]releaseElement, error) {
 			Err: err,
 		}
 	}
-	logger.Info("successfully listed helm releases",
-		zap.Int("count", len(results)))
 	elements := make([]releaseElement, 0, len(results))
 	for _, r := range results {
 		element := releaseElement{
@@ -163,7 +161,7 @@ func searchChartVersions(logger *zap.Logger, charts []string) ([]map[string][]ch
 			versions = append(versions, version)
 		}
 		chartList[i][chartTarget] = versions
-		logger.Info("processed chart versions",
+		logger.Debug("processed chart versions",
 			zap.String("chart", chartTarget),
 			zap.Int("version_count", len(versions)))
 	}
